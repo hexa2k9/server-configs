@@ -3,7 +3,7 @@
 // h5bp server-configs project
 //
 // maintainer: @xonecas
-// contributors: @niftylettuce, @ngryman
+// contributors: @niftylettuce, @ngryman, @d10
 //
 
 (function () {
@@ -18,6 +18,17 @@
         mime,
 
         reDubDubDub = /^www\./;
+
+    // Gzip methods
+    var zlib = require('zlib'),
+        methods = {
+            gzip: zlib.createGzip,
+            deflate: zlib.createDeflate
+        },
+        filter = function(req, res){
+            return /json|text|javascript|xml/.test(res.getHeader('Content-Type'));
+        },
+        names = Object.keys(methods);
 
     // default mime types associations.
     // exposed here for extension or any useful purpose.
@@ -44,7 +55,6 @@
         'ttc': 'application/x-font-ttf',
         'otf': 'font/opentype',
         'woff': 'application/x-font-woff',
-        'ico': 'image/x-icon',
         'webp': 'image/webp',
         'appcache': 'text/cache-manifest',
         'manifest': 'text/cache-manifest',
@@ -183,8 +193,76 @@
                 // @TODO: read specified asset dirs concat everything.
 
                 // Gzip compression
-                // @TODO: we should be able to use the node gzip native bindings.
-                if (options.compress) {}
+                // Based on Connect's compress() middleware
+                if (options.compress) {
+                    (function (options) {
+                        var accept = req.headers['accept-encoding'],
+                            write = res.write,
+                            end = res.end,
+                            stream,
+                            method;
+
+                        if (!accept) { return; }
+
+                        // compression method
+                        // default to gzip
+                        if ('*' == accept.trim()) method = 'gzip';
+                        if (!method) {
+                            for (var i = 0, len = names.length; i < len; ++i) {
+                                if (~accept.indexOf(names[i])) {
+                                    method = names[i];
+                                    break;
+                                }
+                            }
+                        }
+                        if (!method) { return; }
+                    
+                        // default request filter
+                        if (!filter(req, res)) return;
+                    
+                        // head
+                        if ('HEAD' == req.method) return;
+
+                        // vary
+                        res.setHeader('Vary', 'Accept-Encoding');
+
+                        // proxy
+                        res.write = function(chunk, encoding){
+                            if (!this.headerSent) this._implicitHeader();
+                            return stream ? stream.write(new Buffer(chunk, encoding)) : write.call(res, chunk, encoding);
+                        };
+                        res.end = function(chunk, encoding){
+                            if (chunk) this.write(chunk, encoding);
+                            return stream ? stream.end() : end.call(res);
+                        };
+
+                        res.on('header', function(){
+                            var encoding = res.getHeader('Content-Encoding') || 'identity';
+                    
+                            // already encoded
+                            if ('identity' != encoding) return; 
+                    
+                            // compression stream
+                            stream = methods[method](options);
+                    
+                            // header fields
+                            res.setHeader('Content-Encoding', method);
+                            res.removeHeader('Content-Length');
+                    
+                            // compression
+                            stream.on('data', function(chunk){
+                                write.call(res, chunk);
+                            });
+                            stream.on('end', function(){
+                                end.call(res);
+                            });
+                            stream.on('drain', function() {
+                                res.emit('drain');
+                            });
+                        });
+
+                    })(opts.compress);
+                }
 
                 // Expires headers (for better cache control)
                 // These are pretty far-future expires headers.
@@ -324,10 +402,6 @@
             middlewares = [h5bp(options)];
             app = require(options.server)();
 
-            if (options.compress) {
-                middlewares.unshift(app.compress);
-            }
-
             if (true === options.logger || 'object' === typeof options.logger) {
                 middlewares.unshift(app.logger(options.logger));
             }
@@ -375,11 +449,10 @@
      * Module dependencies.
      */
 
-    var http = require('http')
-        , res = http.ServerResponse.prototype
-        , setHeader = res.setHeader
-        , _renderHeaders = res._renderHeaders
-        , writeHead = res.writeHead;
+    var res = http.ServerResponse.prototype,
+        setHeader = res.setHeader,
+        _renderHeaders = res._renderHeaders,
+        writeHead = res.writeHead;
 
     // apply only once
 
